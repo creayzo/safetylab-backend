@@ -1,0 +1,30 @@
+Django==5.2.3
+django-channels==0.7.0
+django-cors-headers==4.7.0
+django-environ==0.12.0
+django-extensions==3.2.3
+django-silk==5.4.0
+django-storages==1.14.6
+django-templated-mail==1.1.1
+djangorestframework==3.16.0
+djangorestframework_simplejwt==5.5.0
+psycopg==3.2.9
+psycopg-pool==3.2.6
+psycopg2-binary==2.9.10
+python-dotenv
+whitenoise==6.5.0
+cryptography>=41.0.0
+
+# Async processing and WAL
+celery>=5.3.0
+redis>=5.0.0
+channels>=4.0.0
+channels-redis>=4.1.0
+daphne>=4.0.0
+
+# Storage for large payloads
+boto3>=1.28.0
+botocore>=1.31.0
+
+# Rate limiting
+django-ratelimit>=4.1.0
