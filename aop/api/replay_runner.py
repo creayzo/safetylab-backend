@@ -184,7 +184,7 @@ class ReplayRunner:
         """
         replayed = {
             'seq_no': event.seq_no,
-            'event_type': event.event_type,
+            'event_type': event.type,
             'actor': event.actor,
             'timestamp': timezone.now().isoformat(),
             'original_payload': event.payload,
@@ -193,13 +193,13 @@ class ReplayRunner:
         }
         
         # Handle different event types
-        if event.event_type == 'reasoning':
+        if event.type == 'reasoning':
             replayed['replayed_payload'] = self._replay_reasoning(event)
-        elif event.event_type == 'action_request':
+        elif event.type == 'action_request':
             replayed['replayed_payload'] = self._replay_action_request(event)
-        elif event.event_type == 'action_response':
+        elif event.type == 'action_response':
             replayed['replayed_payload'] = self._replay_action_response(event)
-        elif event.event_type == 'final_output':
+        elif event.type == 'final_output':
             replayed['replayed_payload'] = self._replay_final_output(event)
         else:
             # For other event types, use original
@@ -210,6 +210,9 @@ class ReplayRunner:
     
     def _replay_reasoning(self, event: TraceEvent) -> Dict[str, Any]:
         """Replay reasoning event (LLM call)."""
+        # Ensure payload is a dict
+        payload = event.payload if isinstance(event.payload, dict) else json.loads(event.payload) if isinstance(event.payload, str) else {}
+        
         # Check for cached LLM response
         if self.use_cached_llm:
             cached = self._get_cached_llm_response(event.seq_no)
@@ -217,8 +220,8 @@ class ReplayRunner:
                 logger.debug(f"Using cached LLM response for seq {event.seq_no}")
                 return {
                     'thought': cached.response_text,
-                    'goal': event.payload.get('goal'),
-                    'steps': event.payload.get('steps', []),
+                    'goal': payload.get('goal'),
+                    'steps': payload.get('steps', []),
                     'source': 'cached'
                 }
         
@@ -227,57 +230,65 @@ class ReplayRunner:
             logger.debug(f"Re-running LLM for seq {event.seq_no}")
             # TODO: Integrate with actual LLM
             # For now, return original with marker
-            payload = event.payload.copy()
+            payload = payload.copy()
             payload['source'] = 'regenerated'
             return payload
         
         # Full mode without cache: use original
-        payload = event.payload.copy()
-        payload['source'] = 'original'
-        return payload
+        result = payload.copy() if isinstance(payload, dict) else {}
+        result['source'] = 'original'
+        return result
     
     def _replay_action_request(self, event: TraceEvent) -> Dict[str, Any]:
         """Replay action request event."""
+        # Ensure payload is a dict
+        payload = event.payload if isinstance(event.payload, dict) else json.loads(event.payload) if isinstance(event.payload, str) else {}
         # Action requests are deterministic, just replay
-        payload = event.payload.copy()
-        payload['source'] = 'original'
-        return payload
+        result = payload.copy() if isinstance(payload, dict) else {}
+        result['source'] = 'original'
+        return result
     
     def _replay_action_response(self, event: TraceEvent) -> Dict[str, Any]:
         """Replay action response event (tool call)."""
+        # Ensure payload is a dict
+        payload = event.payload if isinstance(event.payload, dict) else json.loads(event.payload) if isinstance(event.payload, str) else {}
+        
         # Check for cached tool response
         if self.use_cached_tools:
             cached = self._get_cached_tool_response(event.seq_no)
             if cached:
                 logger.debug(f"Using cached tool response for seq {event.seq_no}")
-                return {
-                    'status': cached.status,
-                    'result': cached.result,
-                    'error': cached.error,
-                    'latency_ms': cached.latency_ms,
-                    'source': 'cached'
-                }
+                # Only include fields that are present in the original payload
+                result = {'status': cached.status, 'result': cached.result}
+                if 'error' in payload:
+                    result['error'] = cached.error
+                if 'latency_ms' in payload:
+                    result['latency_ms'] = cached.latency_ms
+                result['source'] = 'cached'
+                return result
         
         # Otherwise, re-execute tool
         if self.replay_mode != 'full':
             logger.debug(f"Re-executing tool for seq {event.seq_no}")
             # TODO: Integrate with actual tool execution
             # For now, return original with marker
-            payload = event.payload.copy()
-            payload['source'] = 'regenerated'
-            return payload
+            result = payload.copy() if isinstance(payload, dict) else {}
+            result['source'] = 'regenerated'
+            return result
         
         # Full mode without cache: use original
-        payload = event.payload.copy()
-        payload['source'] = 'original'
-        return payload
+        result = payload.copy() if isinstance(payload, dict) else {}
+        result['source'] = 'original'
+        return result
     
     def _replay_final_output(self, event: TraceEvent) -> Dict[str, Any]:
         """Replay final output event."""
+        # Ensure payload is a dict
+        payload = event.payload if isinstance(event.payload, dict) else json.loads(event.payload) if isinstance(event.payload, str) else {}
         # Final output is deterministic from previous steps
-        payload = event.payload.copy()
-        payload['source'] = 'original'
-        return payload
+        result = payload.copy() if isinstance(payload, dict) else {}
+        result['source'] = 'original'
+        return result
     
     def _get_cached_llm_response(self, seq_no: int) -> Optional[CachedLLMResponse]:
         """Get cached LLM response for sequence number."""
@@ -332,7 +343,7 @@ class ReplayRunner:
             is_match, differences = self._compare_payloads(
                 original.payload,
                 replayed['replayed_payload'],
-                original.event_type
+                original.type
             )
             
             if is_match:
@@ -341,7 +352,7 @@ class ReplayRunner:
                 divergent_events += 1
                 divergences.append({
                     'seq_no': original.seq_no,
-                    'event_type': original.event_type,
+                    'event_type': original.type,
                     'type': 'payload_mismatch',
                     'differences': differences,
                     'source': replayed.get('source')
@@ -372,6 +383,13 @@ class ReplayRunner:
             (is_match, list_of_differences)
         """
         differences = []
+        
+        # Normalize original to dict if it's a JSON string
+        if isinstance(original, str):
+            try:
+                original = json.loads(original)
+            except json.JSONDecodeError:
+                pass
         
         # Remove source marker if present
         replayed_clean = {k: v for k, v in replayed.items() if k != 'source'}

@@ -6,17 +6,23 @@ Tests: mock agent → event emission → server ingestion → WAL → evaluation
 
 import json
 import uuid
+import unittest
 from datetime import timedelta
-from django.test import TestCase, TransactionTestCase
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.utils import timezone
 from unittest.mock import patch, MagicMock
 
-from api.models import Organization, Agent, Run, TraceEvent
+from api.models import Organization, Agent, Run, TraceEvent, EvaluationRun
 from api.wal_models import EventWAL
 from api.auth_models import OrganizationSaltKey, AgentAPIKey, SignatureVerifier
-from api.validators.base import ValidationResult
+from api.validators.base import ValidationViolation
+from cryptography.fernet import Fernet
+
+# Test encryption key
+TEST_ENCRYPTION_KEY = Fernet.generate_key()
 
 
+@override_settings(SALT_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
 class EndToEndEventFlowTest(TransactionTestCase):
     """Test complete event flow from client to server."""
     
@@ -46,7 +52,7 @@ class EndToEndEventFlowTest(TransactionTestCase):
             "seq": seq,
             "t": timezone.now().isoformat(),
             "actor": "agent",
-            "type": event_type,
+            "type": type,
             "payload": payload,
             "meta": {
                 "run_id": str(self.run_id),
@@ -55,8 +61,14 @@ class EndToEndEventFlowTest(TransactionTestCase):
         }
         
         # Generate signature
-        salt_key = self.salt_key.get_decrypted_key()
-        signature = SignatureVerifier.generate_signature(event, salt_key)
+        salt_key = self.salt_key.decrypt_salt()
+        payload_str = json.dumps(payload, separators=(',', ':'))
+        signature = SignatureVerifier.generate_signature(
+            org_salt=salt_key,
+            run_id=str(self.run_id),
+            seq_no=seq,
+            payload=payload_str
+        )
         event["meta"]["signature"] = signature
         
         return event
@@ -75,19 +87,26 @@ class EndToEndEventFlowTest(TransactionTestCase):
         
         # Step 3: Verify signature
         signature = event_data["meta"]["signature"]
-        del event_data["meta"]["signature"]  # Remove for verification
+        payload_str = json.dumps(event_data['payload'], separators=(',', ':'))
         
         is_valid = SignatureVerifier.verify_signature(
-            payload=event_data,
-            signature=signature,
-            salt_key=self.salt_key.get_decrypted_key()
+            org_salt=self.salt_key.decrypt_salt(),
+            run_id=str(self.run_id),
+            seq_no=1,
+            payload=payload_str,
+            provided_signature=signature
         )
         self.assertTrue(is_valid)
         
         # Step 4: Create WAL entry
         wal = EventWAL.objects.create(
-            run=run,
-            event_data=event_data,
+            run_id=run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload=event_data['payload'],
+            signature=signature,
             status='pending',
             idempotency_key=f"{self.run_id}:1"
         )
@@ -129,8 +148,13 @@ class EndToEndEventFlowTest(TransactionTestCase):
             
             # Create WAL
             wal = EventWAL.objects.create(
-                run=run,
-                event_data=event_data,
+                run_id=run.run_id,
+                agent_id=self.agent.id,
+                seq_no=seq,
+                event_type='reasoning',
+                timestamp=timezone.now(),
+                payload=event_data['payload'],
+                signature=event_data['meta']['signature'],
                 status='pending',
                 idempotency_key=f"{self.run_id}:{seq}"
             )
@@ -153,7 +177,7 @@ class EndToEndEventFlowTest(TransactionTestCase):
         
         # Verify all events stored
         self.assertEqual(TraceEvent.objects.filter(run=run).count(), 5)
-        self.assertEqual(EventWAL.objects.filter(run=run, status='completed').count(), 5)
+        self.assertEqual(EventWAL.objects.filter(run_id=run.run_id, status='completed').count(), 5)
     
     def test_duplicate_event_rejection(self):
         """Test duplicate event is rejected via idempotency."""
@@ -167,8 +191,13 @@ class EndToEndEventFlowTest(TransactionTestCase):
         
         # First submission
         wal1 = EventWAL.objects.create(
-            run=run,
-            event_data=event_data,
+            run_id=run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload=event_data['payload'],
+            signature=event_data['meta']['signature'],
             status='completed',
             idempotency_key=f"{self.run_id}:1"
         )
@@ -177,8 +206,13 @@ class EndToEndEventFlowTest(TransactionTestCase):
         from django.db import IntegrityError
         with self.assertRaises(IntegrityError):
             wal2 = EventWAL.objects.create(
-                run=run,
-                event_data=event_data,
+                run_id=run.run_id,
+                agent_id=self.agent.id,
+                seq_no=1,
+                event_type='reasoning',
+                timestamp=timezone.now(),
+                payload=event_data['payload'],
+                signature=event_data['meta']['signature'],
                 status='pending',
                 idempotency_key=f"{self.run_id}:1"
             )
@@ -196,13 +230,15 @@ class EndToEndEventFlowTest(TransactionTestCase):
         
         # Tamper with payload
         event_data["payload"]["reasoning"] = "TAMPERED"
-        del event_data["meta"]["signature"]
+        tampered_payload_str = json.dumps(event_data['payload'], separators=(',', ':'))
         
         # Verify signature fails
         is_valid = SignatureVerifier.verify_signature(
-            payload=event_data,
-            signature=signature,
-            salt_key=self.salt_key.get_decrypted_key()
+            org_salt=self.salt_key.decrypt_salt(),
+            run_id=str(self.run_id),
+            seq_no=1,
+            payload=tampered_payload_str,
+            provided_signature=signature
         )
         
         self.assertFalse(is_valid)
@@ -242,6 +278,7 @@ class EndToEndEventFlowTest(TransactionTestCase):
         mock_evaluate.assert_called_once_with(str(run.run_id))
 
 
+@override_settings(SALT_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
 class EvaluationPipelineTest(TestCase):
     """Test evaluation pipeline integration."""
     
@@ -258,7 +295,10 @@ class EvaluationPipelineTest(TestCase):
     def test_run_evaluation_creation(self):
         """Test creating an evaluation run."""
         eval_run = EvaluationRun.objects.create(
-            run=self.run,
+            organization=self.org,
+            agent=self.agent,
+            associated_run=self.run,
+            initiated_by='test_user',
             status='pending',
             evaluator_version='1.0.0'
         )
@@ -282,12 +322,8 @@ class EvaluationPipelineTest(TestCase):
             }
         )
         
-        # Mock validator response
-        mock_validate.return_value = ValidationResult(
-            is_valid=True,
-            severity='info',
-            message='Policy check passed'
-        )
+        # Mock validator response - return empty list (no violations)
+        mock_validate.return_value = []
         
         # Run evaluation
         from api.validators.policy_validator import PolicyValidator
@@ -336,7 +372,10 @@ class EvaluationPipelineTest(TestCase):
     def test_evaluation_result_storage(self):
         """Test evaluation results are stored."""
         eval_run = EvaluationRun.objects.create(
-            run=self.run,
+            organization=self.org,
+            agent=self.agent,
+            associated_run=self.run,
+            initiated_by='test_user',
             status='completed',
             evaluator_version='1.0.0',
             results={
@@ -368,8 +407,13 @@ class BackpressureTest(TestCase):
         # Create many pending WAL entries
         for i in range(100):
             EventWAL.objects.create(
-                run=self.run,
-                event_data={"seq": i + 1},
+                run_id=self.run.run_id,
+                agent_id=self.agent.id,
+                seq_no=i + 1,
+                event_type='reasoning',
+                timestamp=timezone.now(),
+                payload={"seq": i + 1},
+                signature='test_signature',
                 status='pending',
                 idempotency_key=f"{self.run.run_id}:{i + 1}"
             )

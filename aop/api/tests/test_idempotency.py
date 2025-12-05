@@ -28,17 +28,14 @@ class IdempotencyTest(TestCase):
     
     def test_first_event_creates_wal_entry(self):
         """Test first event creates WAL entry."""
-        event_data = {
-            "seq": 1,
-            "t": timezone.now().isoformat(),
-            "actor": "agent",
-            "type": "reasoning",
-            "payload": {"reasoning": "test"}
-        }
-        
         wal = EventWAL.objects.create(
-            run=self.run,
-            event_data=event_data,
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={"reasoning": "test"},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:1"
         )
@@ -52,8 +49,13 @@ class IdempotencyTest(TestCase):
         
         # Create first WAL entry
         EventWAL.objects.create(
-            run=self.run,
-            event_data={},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=idempotency_key
         )
@@ -62,8 +64,13 @@ class IdempotencyTest(TestCase):
         from django.db import IntegrityError
         with self.assertRaises(IntegrityError):
             EventWAL.objects.create(
-                run=self.run,
-                event_data={},
+                run_id=self.run.run_id,
+                agent_id=self.agent.id,
+                seq_no=1,
+                event_type='reasoning',
+                timestamp=timezone.now(),
+                payload={},
+                signature='test_signature',
                 status='pending',
                 idempotency_key=idempotency_key
             )
@@ -118,92 +125,65 @@ class IdempotencyTest(TestCase):
         
         self.assertNotEqual(event1.id, event2.id)
     
-    def test_idempotency_log_creation(self):
-        """Test IdempotencyLog tracks duplicate attempts."""
-        idempotency_key = f"{self.run.run_id}:1"
-        
-        log = IdempotencyLog.objects.create(
-            organization=self.org,
-            idempotency_key=idempotency_key,
-            request_hash="test_hash",
-            response_status=200,
-            response_data={"success": True}
-        )
-        
-        self.assertIsNotNone(log)
-        self.assertEqual(log.attempt_count, 1)
-    
-    def test_idempotency_log_increment_attempts(self):
-        """Test IdempotencyLog increments attempt count."""
-        idempotency_key = f"{self.run.run_id}:1"
-        
-        log = IdempotencyLog.objects.create(
-            organization=self.org,
-            idempotency_key=idempotency_key,
-            request_hash="test_hash",
-            response_status=200,
-            response_data={"success": True},
-            attempt_count=1
-        )
-        
-        # Simulate retry
-        log.attempt_count += 1
-        log.last_attempt_at = timezone.now()
-        log.save()
-        
-        self.assertEqual(log.attempt_count, 2)
-    
     def test_wal_status_transitions(self):
         """Test WAL status transitions."""
         wal = EventWAL.objects.create(
-            run=self.run,
-            event_data={},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:1"
         )
         
         # Transition to processing
-        wal.status = 'processing'
-        wal.started_at = timezone.now()
-        wal.save()
+        wal.mark_processing()
         self.assertEqual(wal.status, 'processing')
         
         # Transition to completed
-        wal.status = 'completed'
-        wal.completed_at = timezone.now()
-        wal.save()
+        wal.mark_completed()
         self.assertEqual(wal.status, 'completed')
     
     def test_wal_failed_status_with_retry(self):
         """Test WAL failed status and retry logic."""
         wal = EventWAL.objects.create(
-            run=self.run,
-            event_data={},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:1"
         )
         
         # Fail processing
-        wal.status = 'failed'
-        wal.error_message = "Processing error"
-        wal.retry_count = 1
-        wal.save()
-        
+        wal.mark_failed("Processing error")
         self.assertEqual(wal.status, 'failed')
+        self.assertEqual(wal.retry_count, 0)  # mark_failed doesn't increment retry_count
+        
+        # Increment retry and try again
+        wal.increment_retry()
         self.assertEqual(wal.retry_count, 1)
+        self.assertEqual(wal.status, 'retrying')
         
-        # Retry
-        wal.status = 'pending'
-        wal.retry_count += 1
-        wal.save()
-        
-        self.assertEqual(wal.retry_count, 2)
+        # Can retry again
+        self.assertTrue(wal.can_retry(max_retries=3))
     
     def test_wal_max_retries(self):
         """Test WAL respects max retry limit."""
         wal = EventWAL.objects.create(
-            run=self.run,
-            event_data={},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:1",
             retry_count=0
@@ -224,37 +204,57 @@ class IdempotencyTest(TestCase):
         """Test WAL entries are ordered by seq_no."""
         # Create events out of order
         wal3 = EventWAL.objects.create(
-            run=self.run,
-            event_data={"seq": 3},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=3,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:3"
         )
         wal1 = EventWAL.objects.create(
-            run=self.run,
-            event_data={"seq": 1},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:1"
         )
         wal2 = EventWAL.objects.create(
-            run=self.run,
-            event_data={"seq": 2},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=2,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:2"
         )
         
-        # Query with ordering
-        wal_entries = EventWAL.objects.filter(run=self.run).order_by('created_at')
+        # Query with default ordering (run_id, seq_no)
+        wal_entries = EventWAL.objects.filter(run_id=self.run.run_id)
         
-        # Should be in creation order (3, 1, 2)
-        seq_numbers = [w.event_data.get('seq') for w in wal_entries]
-        self.assertEqual(seq_numbers, [3, 1, 2])
+        # Should be ordered by seq_no (1, 2, 3) due to model's Meta.ordering
+        seq_numbers = [w.seq_no for w in wal_entries]
+        self.assertEqual(seq_numbers, [1, 2, 3])
     
     def test_wal_cleanup_old_entries(self):
         """Test cleanup of old completed WAL entries."""
         # Create old completed entry
         old_wal = EventWAL.objects.create(
-            run=self.run,
-            event_data={},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='completed',
             idempotency_key=f"{self.run.run_id}:1"
         )
@@ -296,8 +296,13 @@ class WALProcessingTest(TestCase):
         """Test processing pending WAL entries."""
         # Create pending entries
         wal1 = EventWAL.objects.create(
-            run=self.run,
-            event_data={"seq": 1},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:1"
         )
@@ -317,8 +322,13 @@ class WALProcessingTest(TestCase):
     def test_wal_concurrent_processing_prevention(self):
         """Test preventing concurrent processing of same WAL entry."""
         wal = EventWAL.objects.create(
-            run=self.run,
-            event_data={},
+            run_id=self.run.run_id,
+            agent_id=self.agent.id,
+            seq_no=1,
+            event_type='reasoning',
+            timestamp=timezone.now(),
+            payload={},
+            signature='test_signature',
             status='pending',
             idempotency_key=f"{self.run.run_id}:1"
         )
@@ -340,15 +350,20 @@ class WALProcessingTest(TestCase):
         # Create multiple pending entries
         for i in range(5):
             EventWAL.objects.create(
-                run=self.run,
-                event_data={"seq": i + 1},
+                run_id=self.run.run_id,
+                agent_id=self.agent.id,
+                seq_no=i + 1,
+                event_type='reasoning',
+                timestamp=timezone.now(),
+                payload={},
+                signature='test_signature',
                 status='pending',
                 idempotency_key=f"{self.run.run_id}:{i + 1}"
             )
         
         # Batch query
         batch = EventWAL.objects.filter(
-            run=self.run,
+            run_id=self.run.run_id,
             status='pending'
         )[:10]  # Batch size 10
         

@@ -53,6 +53,10 @@ class TimelagValidator(BaseValidator):
         self.warning_threshold = warning_threshold
         self.critical_threshold = critical_threshold
     
+    def validate(self, context: ValidationContext) -> List[ValidationViolation]:
+        """Not used - this validator only runs on complete runs via evaluate_run."""
+        return []
+    
     def validate_event(self, context: ValidationContext) -> List[ValidationViolation]:
         """Not used - this validator only runs on complete runs."""
         return []
@@ -149,6 +153,10 @@ class MissingStepValidator(BaseValidator):
             'final_output': ['reasoning']  # Output needs reasoning
         }
     
+    def validate(self, context: ValidationContext) -> List[ValidationViolation]:
+        """Not used - this validator only runs on complete runs via evaluate_run."""
+        return []
+    
     def validate_event(self, context: ValidationContext) -> List[ValidationViolation]:
         """Not used - this validator only runs on complete runs."""
         return []
@@ -234,6 +242,10 @@ class SequenceValidator(BaseValidator):
             phases=[ValidationPhase.POST_RUN]
         )
         self.max_allowed_gap = max_allowed_gap
+    
+    def validate(self, context: ValidationContext) -> List[ValidationViolation]:
+        """Not used - this validator only runs on complete runs via evaluate_run."""
+        return []
     
     def validate_event(self, context: ValidationContext) -> List[ValidationViolation]:
         """Not used - this validator only runs on complete runs."""
@@ -362,6 +374,10 @@ class EventFrequencyValidator(BaseValidator):
         )
         self.max_events_per_minute = max_events_per_minute
         self.max_events_per_run = max_events_per_run
+    
+    def validate(self, context: ValidationContext) -> List[ValidationViolation]:
+        """Not used - this validator only runs on complete runs via evaluate_run."""
+        return []
     
     def validate_event(self, context: ValidationContext) -> List[ValidationViolation]:
         """Not used - this validator only runs on complete runs."""

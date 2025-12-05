@@ -7,7 +7,7 @@ Tests seed-replay cycles produce identical traces when caching enabled.
 import json
 import random
 import uuid
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from api.models import Organization, Agent, Run, TraceEvent, EnvironmentSnapshot
@@ -24,8 +24,13 @@ from api.replay_runner import (
     cache_tool_response
 )
 from api.auth_models import OrganizationSaltKey
+from cryptography.fernet import Fernet
+
+# Test encryption key
+TEST_ENCRYPTION_KEY = Fernet.generate_key()
 
 
+@override_settings(SALT_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
 class ReplaySnapshotTest(TestCase):
     """Test replay snapshot creation and storage."""
     
@@ -94,6 +99,7 @@ class ReplaySnapshotTest(TestCase):
         self.assertEqual(snapshot.max_tokens, 4096)
 
 
+@override_settings(SALT_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
 class LLMResponseCachingTest(TestCase):
     """Test LLM response caching for deterministic replay."""
     
@@ -116,7 +122,6 @@ class LLMResponseCachingTest(TestCase):
         cached = cache_llm_response(
             snapshot=self.snapshot,
             seq_no=1,
-            event_type='reasoning',
             event_type='reasoning',
             prompt="What is 2+2?",
             response_text="The answer is 4.",
@@ -221,6 +226,7 @@ class LLMResponseCachingTest(TestCase):
         self.assertFalse(cached.consent_given)
 
 
+@override_settings(SALT_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
 class ToolResponseCachingTest(TestCase):
     """Test tool response caching for deterministic replay."""
     
@@ -293,10 +299,10 @@ class ToolResponseCachingTest(TestCase):
             result={"data": "test"}
         )
         
-        # Calculate hash for lookup
+        # Calculate hash for lookup (must match cache_tool_response format)
         import hashlib
         params_hash = hashlib.sha256(
-            json.dumps(params, sort_keys=True).encode('utf-8')
+            json.dumps(params, sort_keys=True, separators=(',', ':')).encode('utf-8')
         ).hexdigest()
         
         # Retrieve
@@ -310,6 +316,7 @@ class ToolResponseCachingTest(TestCase):
         self.assertEqual(retrieved.result, {"data": "test"})
 
 
+@override_settings(SALT_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
 class DeterministicReplayTest(TestCase):
     """Test deterministic replay produces identical results."""
     
@@ -454,9 +461,10 @@ class DeterministicReplayTest(TestCase):
         report = replay_run.generate_report()
         
         self.assertIsNotNone(report)
-        self.assertIn('total_events', report)
-        self.assertIn('matching_events', report)
-        self.assertIn('reproducibility_score', report)
+        self.assertIn('metrics', report)
+        self.assertIn('total_events', report['metrics'])
+        self.assertIn('matching_events', report['metrics'])
+        self.assertIn('reproducibility_score', report['metrics'])
     
     def test_divergence_detection(self):
         """Test divergence detection in replay."""
@@ -485,6 +493,7 @@ class DeterministicReplayTest(TestCase):
         self.assertIn('difference_type', divergence)
 
 
+@override_settings(SALT_ENCRYPTION_KEY=TEST_ENCRYPTION_KEY)
 class ReplayModesTest(TestCase):
     """Test different replay modes."""
     

@@ -199,8 +199,9 @@ class CachedLLMResponse(models.Model):
     
     def is_expired(self) -> bool:
         """Check if cache entry has expired."""
+        from django.utils import timezone
         if self.expires_at:
-            return datetime.now() >= self.expires_at
+            return timezone.now() >= self.expires_at
         return False
 
 

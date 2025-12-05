@@ -122,6 +122,12 @@ class OrganizationSaltKey(models.Model):
         
         # Create new key
         return self.create_for_organization(self.organization)
+    
+    def is_expired(self) -> bool:
+        """Check if the salt key has expired."""
+        if self.expires_at is None:
+            return False
+        return timezone.now() > self.expires_at
 
 
 class AgentAPIKey(models.Model):
