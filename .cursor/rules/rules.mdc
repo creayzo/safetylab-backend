@@ -1,0 +1,6 @@
+---
+alwaysApply: true
+---
+#Critical
+Do not generate documentation or any markdown files until asked to do so.
+Keep functions short and do not exceed function length more than 70 lines
